@@ -181,6 +181,8 @@ exports.for_each = exports.each
 methods.foreach = methods.each
 exports.foreach = exports.each
 
+local chain = nil
+
 --------------------------------------------------------------------------------
 -- Generators
 --------------------------------------------------------------------------------
@@ -432,6 +434,89 @@ local drop_while = function(fun, gen_x, param_x, state_x)
 end
 methods.drop_while = method1(drop_while)
 exports.drop_while = export1(drop_while)
+
+-- Helper of 'wrap_with_elems'
+local gen_with_elems_wrapper = function(gen_param_elems, state)
+    local elems = gen_param_elems[3]
+    if not elems then
+        return gen_param_elems[1](gen_param_elems[2], state)
+    else
+        gen_param_elems[3] = nil
+        return state, unpack(elems)
+    end
+end
+
+-- Wrap an iterator that yields all values from 'elems' table on the first
+-- iteration and then works in the same way as 'wrap(gen, param, state)'
+local wrap_with_elems = function(elems, gen, param, state)
+    local gen_param_elems = {gen, param, elems}
+    return wrap(gen_with_elems_wrapper, gen_param_elems, state)
+end
+
+-- Checks if drop_while should continue skipping. If iterator is not exhausted,
+-- elements returned by iterator are wrapped into a table and returned as the
+-- third return value
+local stateful_drop_while_check = function(fun, state_x, ...)
+    if state_x == nil then
+        return state_x, false
+    end
+    return state_x, fun(...), {...}
+end
+
+-- Implementation of method drop_while: original one copies iterator state to
+-- iterate over the same element twice - it doesn't work with stateful iterators
+local stateful_drop_while = function(fun, gen_x, param_x, state_x)
+    assert(type(fun) == "function", "invalid first argument to drop_while")
+    local cont = true
+    local elems
+    while state_x ~= nil and cont do
+        state_x, cont, elems = stateful_drop_while_check(fun, gen_x(param_x, state_x))
+    end
+    if state_x == nil then
+        return wrap(nil_gen, nil, nil)
+    end
+    return wrap_with_elems(elems, gen_x, param_x, state_x)
+end
+
+methods.stateful_drop_while = method1(stateful_drop_while)
+exports.stateful_drop_while = export1(stateful_drop_while)
+
+-- Creates a singleton iterator: it returns the given values on
+-- the first iteration and ends then.
+local repeat_once = function(...)
+    return take_n(1, duplicate(...))
+end
+
+-- See stateful_drop_while().
+local function stateful_drop_while_impl(fun, gen, param, state, ...)
+    -- If the iterator is exhausted, return nil iterator.
+    if state == nil then
+        return wrap(nil_gen, nil, nil)
+    end
+    -- While the predicate is positive, advance the iterator.
+    if fun(...) then
+        return stateful_drop_while_impl(fun, gen, param, gen(param, state))
+    end
+    -- Once the predicate becomes negative, return an iterator
+    -- that repeats the last value and then returns all the
+    -- following ones from the original iterator.
+    return chain(repeat_once(...), wrap(gen, param, state))
+end
+
+-- Advances the given iterator until the function becomes false,
+-- then returns the current element on the first iteration and
+-- the remaining elements on the next iterations.
+--
+-- Unlike drop_while() this implementation doesn't attempt to
+-- repeat a previous iteration by calling the `gen` function with
+-- the previous `state`.
+local stateful_drop_while2 = function(fun, gen, param, state)
+    assert(type(fun) == "function", "invalid first argument to drop_while")
+    return stateful_drop_while_impl(fun, gen, param, gen(param, state))
+end
+
+methods.stateful_drop_while2 = method1(stateful_drop_while2)
+exports.stateful_drop_while2 = export1(stateful_drop_while2)
 
 local drop = function(n_or_fun, gen_x, param_x, state_x)
     if type(n_or_fun) == "number" then
@@ -943,7 +1028,7 @@ local chain_gen_r2 = function(param, state, state_x, ...)
     if state_x == nil then
         local i = state[1]
         i = i + 1
-        if param[3 * i - 1] == nil then
+        if param[3 * i - 2] == nil then
             return nil
         end
         local state_x = param[3 * i]
@@ -958,7 +1043,7 @@ chain_gen_r1 = function(param, state)
     return chain_gen_r2(param, state, gen_x(param_x, state[2]))
 end
 
-local chain = function(...)
+chain = function(...)
     local n = numargs(...)
     if n == 0 then
         return wrap(nil_gen, nil, nil)
